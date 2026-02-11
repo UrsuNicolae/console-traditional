@@ -7,7 +7,7 @@
         public Person(string name, int age)
         {
             this.name = name;
-            this.age = age;
+            this.age = age;//werwer
         }
 
         public void DisplayInfo()
