@@ -1,0 +1,460 @@
+CREATE OR REPLACE PACKAGE BODY ESHOP_ADMIN2.sales_pkg$bff$V_2
+AS
+    PROCEDURE set_cis_debug_date
+        IS
+    BEGIN
+        IF (SALES_PKG$BFF.enable_debug)
+        THEN
+            NULL;
+            imapro.debug_cmp_rules3$p@CIS_BFF.VOXTEL.MD(SYSDATE /*eshop_cis_rules$v2.debug_date*/
+                , 0);
+        END IF;
+    END;
+
+    PROCEDURE set_cis_user(i_user IN VARCHAR2)
+        IS
+    BEGIN
+        IF i_user IS NOT NULL
+        THEN
+            cpm.DOCS$ESHOP_Support$p.SetEshopUser@CIS_BFF.VOXTEL.MD(i_user);
+        END IF;
+    END;
+
+    --close reset db link connection, otherwise extranet can throw exception
+    --ORA-14450: attempt to access a transactional temp table already in use
+    PROCEDURE resetDBLink is
+    begin
+        rollback;
+        DBMS_SESSION.CLOSE_DATABASE_LINK('CIS_BFF.VOXTEL.MD');
+        dbms_output.put_line('closed');
+    exception
+        when OTHERS then
+            null;
+            dbms_output.put_line(SQLERRM);
+    end;
+
+PROCEDURE refresh_single_rule_item(
+        request IN SALES_REFRESH_RULEITEMS_REQUEST_ITEM_TYPE,
+        response OUT SALES_REFRESH_RULEITEMS_RESPONSE_ITEM_TYPE) is
+        i                NUMBER;
+        ex               NUMBER;
+		p_selected       VARCHAR2 (4000) := NVL(request.P_SELECTED, NULL);
+        v_poff           SALES_RULES_ITEM_TYPE;
+        v_added          VARCHAR2(32676);
+        v_added2         CLOB;
+        v_banned         VARCHAR2(32676);
+        v_changed        VARCHAR2(32676);
+        v_debug_info     Varchar2(30000);
+        v_props          cpm.Rules3$2out$p.props := cpm.Rules3$2out$p.props();
+        v_prevoffer      cpm.Rules3$2out$p.rules_items:=cpm.Rules3$2out$p.rules_items();
+        v_nextoffers     cpm.Rules3$2out$p.rules_items:= cpm.Rules3$2out$p.rules_items();
+        v_nextoffer      cpm.Rules3$2out$p.rules_item;
+        v_resultOffers   sales_rules_item_table_type := sales_rules_item_table_type();
+        v_resultOffer    sales_rules_item_type;
+        v_fullscan       BOOLEAN                     := FALSE;
+        start_time       TIMESTAMP;
+        v_banned_filters wwwadmin.wiz$offerselector$p.banned_filters;
+    BEGIN
+
+        --         v_debug_info := 'Request  ' || JSON_SERIALIZE(request);
+
+        start_time := CURRENT_TIMESTAMP;
+
+        IF (NVL(request.P_USE_FULLSCAN_MODE, 0) = 1)
+        THEN
+            v_fullscan := TRUE;
+        END IF;
+
+        --         v_debug_info :=
+--                     'v_fullscan='
+--                     || TO_CHAR(SYS.DIUTIL.bool_to_int(v_fullscan))
+--                     || ', v_exclude_hardware='
+--                     || TO_CHAR(SYS.DIUTIL.bool_to_int(v_exclude_hardware))
+--                     || ', p_selected='
+--                     || request.P_SELECTED;
+        ex := 0;
+
+--         v_debug_info := v_debug_info || ' |refresh_single_rule_item timing: start' || CURRENT_TIMESTAMP - start_time;
+
+        v_props.EXTEND(request.P_PROPS.COUNT);
+
+        v_debug_info := v_debug_info || 'Props Start';
+        FOR i IN request.P_PROPS.FIRST .. request.P_PROPS.LAST
+            LOOP
+                v_props(i).code := request.P_PROPS(i).CODE;
+                v_props(i).value := request.P_PROPS(i).VALUE;
+
+--                 v_debug_info:= v_debug_info || 'Prop ' || request.P_PROPS(i).CODE || ':' || request.P_PROPS(i).VALUE ;
+            END LOOP;
+        v_debug_info := v_debug_info || 'Props End\n';
+
+        v_debug_info :=
+                    v_debug_info || ' |refresh_single_rule_item timing: copy props' || (CURRENT_TIMESTAMP - start_time);
+
+        if (request.P_RULE_ITEMS.COUNT > 0)
+        then
+            v_prevoffer.EXTEND(request.P_RULE_ITEMS.COUNT);
+            FOR i IN request.P_RULE_ITEMS.FIRST .. request.P_RULE_ITEMS.LAST
+                LOOP
+                    v_poff := request.P_RULE_ITEMS(i);
+
+                    v_prevoffer(i).ruleid := v_poff.ruleid;
+                    v_prevoffer(i).ruleitemid := v_poff.ruleitemid;
+                    v_prevoffer(i).parentitemid := v_poff.parentitemid;
+                    v_prevoffer(i).dateb := v_poff.dateb;
+                    v_prevoffer(i).datee := v_poff.datee;
+                    v_prevoffer(i).includetype := v_poff.includetype;
+                    v_prevoffer(i).includesubtype := v_poff.includesubtype;
+                    v_prevoffer(i).extrusion := v_poff.extrusion;
+                    v_prevoffer(i).itemtype := v_poff.itemtype;
+                    v_prevoffer(i).itemsubtype := v_poff.itemsubtype;
+                    v_prevoffer(i).itemid := v_poff.itemid;
+                    v_prevoffer(i).exitid := v_poff.exitid;
+                    v_prevoffer(i).exportid := v_poff.exportid;
+                    v_prevoffer(i).price := v_poff.price;
+                    v_prevoffer(i).price2 := v_poff.price2;
+                    v_prevoffer(i).allocation := v_poff.allocation;
+                    v_prevoffer(i).rldocid := v_poff.rldocid;
+                    v_prevoffer(i).rldocrid := v_poff.rldocrid;
+                    v_prevoffer(i).rlevel := v_poff.rlevel;
+                    v_prevoffer(i).promolevel := v_poff.promolevel;
+                    v_prevoffer(i).LOYALTY := v_poff.LOYALTY;
+                    v_prevoffer(i).EXPIRES_HOURS := v_poff.EXPIRES_HOURS;
+                END LOOP;
+        end if;
+        v_debug_info := v_debug_info || ' |refresh_single_rule_item timing: copy ruleItems' ||
+                        (CURRENT_TIMESTAMP - start_time);
+
+        set_cis_debug_date();
+
+        if request.P_USE_EXTRANET_FILTERING = 1 then
+            if request.p_include_hardware_id is not null then
+                IMAPRO.eshop_api.set_session_itemtypes(request.p_include_hardware_id);
+            end if;
+
+            if request.P_INCLUDE_ITEM_TYPES is not null then
+                IMAPRO.eshop_api.set_session_includesubtypes(request.P_INCLUDE_ITEM_TYPES);
+            end if;
+            else
+            resetDBLink();
+        end if;
+		--test1
+		cpm.Rules3$2out$p.refreshrulesitems(v_props,
+                                                  v_prevoffer,
+                                                  p_selected,
+                                                  v_nextoffers,
+                                                  v_added,
+                                                  v_banned,
+                                                  v_changed,
+                                                  v_added2);
+        
+
+        v_debug_info := v_debug_info || ' |refresh_single_rule_item timing: called sales' ||
+                        (CURRENT_TIMESTAMP - start_time) || ' |V_ADDED length is ' ||  LENGTH(v_added) || ' and v_nextoffer count is ' || v_nextoffers.COUNT;
+
+        ex := 1;
+        FOR i IN v_nextoffers.first .. v_nextoffers.last
+            LOOP
+              IF (v_nextoffers.EXISTS(i)) THEN
+                  v_nextoffer := v_nextoffers(i);
+                  v_resultOffers.extend(1);
+                  v_resultOffers(ex) := SALES_RULES_ITEM_TYPE(
+                          v_nextoffer.RULEID,
+                          v_nextoffer.RULEITEMID,
+                          v_nextoffer.PARENTITEMID,
+                          v_nextoffer.DATEB,
+                          v_nextoffer.DATEE,
+                          v_nextoffer.INCLUDETYPE,
+                          v_nextoffer.INCLUDESUBTYPE,
+                          v_nextoffer.EXTRUSION,
+                          v_nextoffer.ITEMTYPE,
+                          v_nextoffer.ITEMSUBTYPE,
+                          v_nextoffer.ITEMID,
+                          v_nextoffer.EXITID,
+                          v_nextoffer.EXPORTID,
+                          v_nextoffer.PRICE,
+                          v_nextoffer.PRICE2,
+                          v_nextoffer.ALLOCATION,
+                          v_nextoffer.RLDOCID,
+                          v_nextoffer.RLDOCRID,
+                          v_nextoffer.LOYALTY,
+                          v_nextoffer.EXPIRES_HOURS,
+                          v_nextoffer.RLEVEL,
+                          v_nextoffer.PROMOLEVEL);
+                   ex := ex + 1;
+                END IF;
+
+            END LOOP;
+
+        v_debug_info := v_debug_info || ' |refresh_single_rule_item timing: called filter rule items' ||
+                        (CURRENT_TIMESTAMP - start_time);
+
+        response := SALES_REFRESH_RULEITEMS_RESPONSE_ITEM_TYPE(v_resultOffers, TO_CLOB(v_added) || TO_CLOB(v_added2), v_banned, v_changed, v_debug_info);
+    end;
+
+    PROCEDURE REFRESHMULTIPLERULESITEMS(request in sales_refresh_ruleitems_request,
+                                        response out sales_refresh_ruleitems_response) as
+        start_time       TIMESTAMP;
+        func_start_time  TIMESTAMP;
+        lv_responseItems sales_refresh_ruleitems_response_item_table_type := sales_refresh_ruleitems_response_item_table_type();
+        lv_responseItem  SALES_REFRESH_RULEITEMS_RESPONSE_ITEM_TYPE;
+    begin
+        start_time := CURRENT_TIMESTAMP;
+
+        lv_responseItems.extend(request.ITEMS.COUNT);
+        for i in request.items.FIRST .. request.ITEMS.LAST
+            LOOP
+                func_start_time := CURRENT_TIMESTAMP;
+
+                refresh_single_rule_item(request.ITEMS(i), lv_responseItem);
+
+                lv_responseItems.extend(1);
+                lv_responseItems(i) := lv_responseItem;
+                --                 lv_responseItems(i).o_debug_info := lv_responseItems(i).o_debug_info  ||
+--                                                     '  |Func Execution Time'|| (CURRENT_TIMESTAMP - func_start_time) ||
+--                                                     '  |Total Execution Time'|| (CURRENT_TIMESTAMP - start_time);
+            end loop;
+
+        response := sales_refresh_ruleitems_response(lv_responseItems);
+    end;
+
+    procedure get_hard_eligibility_props(i_props in out SALES_RULE_ENGINE_PROPERTY_TABLE_TYPE, i_cust_no in number,
+                                         i_hard_vocid in number, i_line_no in number, i_pack_id in number) as
+        v_props   cpm.rules3$p.props/*@CIS_BFF.VOXTEL.MD*/ := cpm.rules3$p.props()/*@CIS_BFF.VOXTEL.MD*/;
+        v_prop  SALES_RULE_ENGINE_PROPERTY_TYPE;
+    begin
+
+        v_props.EXTEND(i_props.COUNT);
+        FOR i IN i_props.FIRST .. i_props.LAST
+            LOOP
+                v_props(i).code := i_props(i).CODE;
+                v_props(i).value := i_props(i).VALUE;
+            END LOOP;
+
+        resetDBLink();
+
+        Cpm.DOCS$ESHOP_Support$p.CheckAddTechItems/*@CIS_BFF.VOXTEL.MD */(i_cust_no,
+                                                v_props,
+                                                i_hard_vocid,
+                                                i_line_no,
+                                                i_pack_id);
+
+        i_props := SALES_RULE_ENGINE_PROPERTY_TABLE_TYPE();
+        i_props.extend(v_props.count);
+        FOR i IN v_props.FIRST .. v_props.LAST
+        LOOP
+            i_props(i) := SALES_RULE_ENGINE_PROPERTY_TYPE(v_props(i).CODE,v_props(i).VALUE);
+        END LOOP;
+    end;
+
+    PROCEDURE get_cis_packages(o_cur OUT CNST.curtype)
+        IS
+    BEGIN
+        OPEN o_cur FOR SELECT vocid, vocname
+                       FROM cpm.cash_pad_items$t@CIS_BFF.VOXTEL.MD
+                       WHERE parentid = 2
+                       ORDER BY 2;
+    END;
+
+    PROCEDURE get_cis_services(o_cur OUT CNST.curtype)
+        IS
+    BEGIN
+        OPEN o_cur FOR SELECT DISTINCT vocid, vocname
+                       FROM cpm.cash_pad_items$t@CIS_BFF.VOXTEL.MD
+                       WHERE itemtype <> 'FOLDER'
+                       CONNECT BY PRIOR vocid = parentid
+                       START WITH vocid IN (101406, 101008)
+                       ORDER BY 1 DESC;
+    END;
+
+    PROCEDURE get_cis_hardware(o_cur OUT CNST.curtype)
+        IS
+    BEGIN
+        OPEN o_cur FOR
+            SELECT vocid,
+                   vocname || ' (' || TO_CHAR(vocid) || ')' AS vocname
+            FROM cpm.cash_pad_items$t@CIS_BFF.VOXTEL.MD
+            WHERE itemtype = 'HARDWARE'
+               OR itemtype = 'HARDWAREACC'
+               OR itemtype = 'PREPAY'
+            UNION
+            SELECT -1 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -2 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -3 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -4 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -5 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -6 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -7 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT -8 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            UNION
+            SELECT 9 AS item_type_id, 'FAKE EXTRANET ITEM' AS item_type_name
+            FROM DUAL
+            ORDER BY 2;
+    END;
+
+    PROCEDURE clear_cash_pad_items
+        IS
+    BEGIN
+        /*
+         Use 2 to rebuild CASH_ESHOP$ITEMS_ALL_CUR$V
+         And 1 to rebuild both CASH_PAD_ITEMS$T and CASH_ESHOP$ITEMS_ALL_CUR$V
+        */
+        CPM.DOCS$ESHOP_Support$p.UpdateCashe@cis(2);
+    END;
+
+    PROCEDURE get_gift_ruleitems(o_cur OUT CNST.curtype)
+        IS
+    BEGIN
+        OPEN o_cur FOR
+            SELECT RULEID,
+                   RULEITEMID,
+                   INCLUDETYPE,
+                   INCLUDESUBTYPE,
+                   ITEMID,
+                   PRICE,
+                   PRICE2,
+                   NVL(ALLOCATION, 0) AS ALLOCATION,
+                   HARDDEPENDENCY,
+                   SPECIALOFFER
+            FROM cpm.cash_eshop$items_all_cur$v@cis
+            WHERE INCLUDESUBTYPE IN ('GIFT', 'SIMPLE')
+              AND HARDDEPENDENCY IS NOT NULL
+              AND NVL(CHANNEL, 'ESHOP') = 'ESHOP';
+    END;
+   
+   PROCEDURE get_all_gift_ruleitems(o_cur OUT CNST.curtype)
+        IS
+    BEGIN
+        OPEN o_cur FOR
+            SELECT RULEID,
+                   RULEITEMID,
+                   INCLUDETYPE,
+                   INCLUDESUBTYPE,
+                   ITEMID,
+                   PRICE,
+                   PRICE2,
+                   NVL(ALLOCATION, 0) AS ALLOCATION,
+                   HARDDEPENDENCY,
+                   SPECIALOFFER
+            FROM cpm.cash_eshop$items_all_cur$v@cis
+            WHERE INCLUDESUBTYPE IN ('GIFT', 'SIMPLE')
+              AND NVL(CHANNEL, 'ESHOP') = 'ESHOP';
+    END;
+
+    PROCEDURE nice_msisdn$fiter(i_main IN VARCHAR2,
+                                i_up IN VARCHAR2,
+                                i_down IN VARCHAR2,
+                                i_page_number IN NUMBER,
+                                i_page_size IN NUMBER,
+                                o_cur OUT CNST.curtype)
+        IS
+        v_start     NUMBER;
+        v_end       NUMBER;
+        v_page_size NUMBER;
+    BEGIN
+        IF i_main IS NOT NULL
+        THEN
+            v_page_size := i_page_size - 1;
+            v_start := (i_page_number * v_page_size) + 1;
+            v_end := (i_page_number + 1) * v_page_size;
+
+            OPEN o_cur FOR
+                SELECT '0' || msisdn_no AS msisdn_no, search_class, nr
+                FROM (SELECT msisdn_no,
+                             search_class,
+                             ROW_NUMBER()
+                                     OVER (ORDER BY search_class, msisdn_no) AS nr
+                      FROM (SELECT msisdn_no, 1 AS search_class
+                            FROM pb.msisdn m
+                            WHERE ms_class = 81
+                              AND msisdn_status = 0
+                              AND product_no = '01'
+                              AND '0' || msisdn_no LIKE
+                                  '%' || i_main || '%')
+                      ORDER BY search_class, msisdn_no)
+                WHERE nr BETWEEN v_start AND v_end;
+        ELSE
+            OPEN o_cur FOR
+                SELECT '0' || msisdn_no AS msisdn_no, 1 AS search_class
+                FROM (SELECT msisdn_no, 1 AS search_class
+                      FROM pb.msisdn m
+                      WHERE ms_class = 81
+                        AND msisdn_status = 0
+                        AND product_no = '01'
+                      ORDER BY DBMS_RANDOM.VALUE)
+                WHERE ROWNUM < i_page_size;
+        END IF;
+    END;
+
+    PROCEDURE customer_context_props(
+        i_customer_no IN NUMBER,
+        i_selected_msisdn IN VARCHAR2,
+        o_cur OUT CNST.curtype)
+        IS
+        v_custtype VARCHAR2(200);
+        pprops     cpm.rules3$p.props@CIS_BFF.VOXTEL.MD;
+        i          NUMBER;
+        v_step     VARCHAR2(200);
+    BEGIN
+        IF i_customer_no IS NULL
+        THEN
+            raise_application_error(-20000, 'Null parameter i_customer_no!');
+        END IF;
+
+        resetDBLink();
+
+
+        cpm.docs$eshop_support$p.BuildCustomerContext2@CIS_BFF.VOXTEL.MD(
+                i_customer_no,
+                NULL,
+                NULL,
+                pprops,
+                TRUE,
+                i_selected_msisdn); --no loyalty
+
+
+        DELETE FROM t_props;
+
+        v_step := '3';
+
+        FOR i IN 1 .. pprops.COUNT
+            LOOP
+                INSERT INTO t_props (code, VALUE)
+                VALUES (pprops(i).code, pprops(i).VALUE);
+            END LOOP;
+
+        v_step := '4';
+
+        OPEN o_cur FOR SELECT * FROM t_props;
+
+        v_step := '5';
+    EXCEPTION
+        WHEN OTHERS
+            THEN
+                LOG_PKG$BFF.inser_db_log(
+                        i_event_type_id => 1,
+                        i_id1 => NULL,
+                        i_id1_num => NULL,
+                        i_id1_text =>
+                                'customer_context_props_2:'
+                                || SQLERRM
+                                || ', step='
+                                || v_step);
+                RAISE;
+    END;
+END;
